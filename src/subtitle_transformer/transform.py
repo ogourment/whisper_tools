@@ -16,20 +16,47 @@ LINE_RE = re.compile(r"^\s*\[(\d{2}):(\d{2}\.\d{3})\s*-->\s*(\d{2}):(\d{2}\.\d{3
 SENT_END = ('.', '!', '?', '…', ':')
 
 
-def parse_subtitle_lines(text: str) -> List[Dict]:
-    """Parse lines and return list of dicts with start_minute and text.
+# Whisper-style single-line timestamps
+RE_WHISPER = re.compile(
+    r"^\s*\[(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{2}):(\d{2})[.,](\d{3})\]\s*(.*)$"
+)
 
-    Lines that don't match are ignored.
-    """
-    items = []
-    for raw in text.splitlines():
-        m = LINE_RE.match(raw)
-        if not m:
+# Standard SRT timestamp (HH:MM:SS,mmm --> HH:MM:SS,mmm)
+RE_SRT = re.compile(
+    r"^(\d{2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[.,](\d{3})$"
+)
+
+def parse_subtitle_lines(text: str) -> List[Dict]:
+    items: List[Dict] = []
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        # Whisper style
+        m = RE_WHISPER.match(line)
+        if m:
+            minute = int(m.group(1))
+            payload = m.group(7).strip()
+            items.append({"minute": minute, "text": payload})
+            i += 1
             continue
-        minute = int(m.group(1))
-        # seconds_str = m.group(2)  # not used here, but could be
-        payload = m.group(5).strip()
-        items.append({"minute": minute, "text": payload})
+        # SRT block
+        m = RE_SRT.match(line)
+        if m:
+            hh = int(m.group(1))
+            mm = int(m.group(2))
+            minute = hh * 60 + mm
+            i += 1
+            # collect subtitle text lines until blank or end
+            text_lines = []
+            while i < len(lines) and lines[i].strip() != "":
+                text_lines.append(lines[i].strip())
+                i += 1
+            payload = " ".join(text_lines)
+            items.append({"minute": minute, "text": payload})
+            i += 1  # skip blank line
+            continue
+        i += 1  # skip unrecognized line
     return items
 
 
@@ -74,13 +101,54 @@ def transform_subtitles(text: str) -> str:
     return "\n".join(out_lines)
 
 
-if __name__ == "__main__":
-    import sys
+def main(argv=None) -> int:
+    """Console entry point.
 
-    if len(sys.argv) > 1:
-        path = sys.argv[1]
-        with open(path, "r", encoding="utf-8") as f:
-            s = f.read()
-    else:
-        s = sys.stdin.read()
-    print(transform_subtitles(s))
+    Usage:
+        python -m subtitle_transformer [files...]
+        python -m subtitle_transformer file1.srt file2.srt > out.txt
+        cat file.srt | python -m subtitle_transformer -   # read from stdin with "-"
+    """
+    import argparse
+    import sys
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(
+        prog="subtitle_transformer",
+        description="Group subtitle lines by start-minute and print minute-indexed paragraphs.",
+    )
+    parser.add_argument(
+        "files",
+        nargs="*",
+        help="Subtitle files to process. If empty, reads stdin. Use '-' to read stdin explicitly.",
+    )
+    args = parser.parse_args(argv)
+
+    # Helper to read a file or stdin
+    def read_source(path_str: str) -> str:
+        if path_str == "-" or not path_str:
+            return sys.stdin.read()
+        p = Path(path_str)
+        return p.read_text(encoding="utf-8")
+
+    # If no files provided, read stdin
+    if not args.files:
+        text = sys.stdin.read()
+        output = transform_subtitles(text)
+        print(output)
+        return 0
+
+    # Otherwise process every file and print outputs sequentially
+    for path in args.files:
+        text = read_source(path)
+        output = transform_subtitles(text)
+        print(output)
+        # separate multiple files with a blank line for readability
+        if path != args.files[-1]:
+            print()
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
